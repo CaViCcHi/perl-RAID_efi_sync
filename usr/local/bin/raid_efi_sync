@@ -1,0 +1,142 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+
+use Data::Dumper;
+
+my $basedir	= '/matteo/raid_efi_sync';
+
+my $devdir	= '/dev';
+my $bootdir	= '/boot/efi';
+
+my $dir_sync= 'sync';
+my $dir_mnt	= 'mnt';
+
+my @efiparts= qw(sda1 sdb1);
+
+my $matrix = {};
+
+our $LOG_DEBUG = 0;
+
+init();
+awake();
+
+## Realization
+sub init
+{
+	foreach my $part (@efiparts)
+	{
+		my ($dev, $x, $y);
+		if($part =~ m/([a-zA-Z]{1,}?)([a-zA-Z]{1})([0-9]{1,})/)
+		{
+			$dev = $1;
+			$x = $2;
+			$y = $3;
+	
+			llog("DEBUG: Device:$dev x:$x y:$y");
+		}
+		else
+		{
+			llog("Unrecognized device! $part");
+			die();
+		}
+		system("mount | egrep ^${devdir}/${part}.*${bootdir}\[^\\w]+ &>/dev/null");
+		if($?)
+		{
+			llog("Raid Disk: ${dev}${x}");
+			push(@{$matrix->{raid}->{backup}},{ disk => $dev.$x, part => $part });
+	
+			mkdir($basedir.'/'.$dir_mnt);
+			mkdir($basedir.'/'.$dir_sync);
+			# I'm sure I'll need to know it later
+			if(!-d $basedir.'/'.$dir_sync.'/'.$dev.$x)
+			{
+				mkdir($basedir.'/'.$dir_mnt.'/'.$dev.$x);
+				mkdir($basedir.'/'.$dir_sync.'/'.$dev.$x);
+				
+				push(@{$matrix->{first}}, $dev.$x);
+	
+				ssystem("/usr/bin/rsync -q -r ${bootdir}/ ${basedir}/${dir_sync}/${dev}${x}/", 1);
+			}
+		}
+		else
+		{
+			llog("Active Disk: ${dev}${x}");
+			$matrix->{raid}->{primary} = { disk => $dev.$x, part => $part };
+		}
+	}
+}
+
+# Reaction
+sub awake
+{
+	my $now = time();
+	# ok then, I need to sync
+	foreach my $j (@{$matrix->{raid}->{backup}})
+	{
+		next if(exists($matrix->{first}) && ($j->{disk} ~~ @{$matrix->{first}}));
+
+		# let me see what's for dinner...
+		system("/usr/bin/diff -q -r ${bootdir} ${basedir}/${dir_sync}/$j->{disk} &>/dev/null");
+		if($?)
+		{
+			llog("syncing:$j->{disk}");
+			# Something WAS different, hence sync!
+			# Mount the backup partition
+			ssystem("mount ${devdir}/$j->{part} ${basedir}/${dir_mnt}/$j->{disk}", 1);
+			# Sync with backup partition
+			ssystem("/usr/bin/rsync -q -r ${bootdir}/ ${basedir}/${dir_mnt}/$j->{disk}/", 1);
+			# Sync with sync-dir
+			ssystem("/usr/bin/rsync -q -r ${bootdir}/ ${basedir}/${dir_sync}/$j->{disk}/", 1);
+
+			# Sync when?
+			$j->{last} = $now;
+	
+			# And now umount the disk
+			ssystem("umount -f ${basedir}/${dir_mnt}/$j->{disk}", 1);
+		next;
+		}
+		llog("Nothing to do seems...");
+	}
+}
+
+sub debug
+{
+	print Dumper($matrix);
+}
+
+sub llog
+{
+	my $msg = shift;
+	
+	if($msg =~ m/^([A-Z0-9]{2,}): /)
+	{
+		my $top=$1;
+		# In this case we just care about log level;
+		return 0 if($top eq "DEBUG" && !$LOG_DEBUG);
+	}
+
+	print $msg."\n";
+}
+
+sub ssystem
+{
+	my $cmd = shift;
+	my $retry = shift || 0; # Max Retries
+	
+	my $r=0; # Retries
+	my $rt=2; # Retry time sleep multiplier
+	
+SYS:
+	system($cmd);
+	if($?)
+	{
+		llog("FAILED[$r]: $cmd");
+
+		$r++;
+		sleep($r*$rt);
+		return 1 if($r >= $retry);
+		goto SYS;
+	}
+}

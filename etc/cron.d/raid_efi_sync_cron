@@ -1,0 +1,2 @@
+# Run raid efi sync every 5 minutes
+0/5 * * * * root /usr/local/bin/raid_efi_sync
